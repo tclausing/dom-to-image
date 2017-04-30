@@ -5,6 +5,7 @@
     var inliner = newInliner();
     var fontFaces = newFontFaces();
     var images = newImages();
+    var asyncState;
 
     var domtoimage = {
         toSvg: toSvg,
@@ -41,44 +42,137 @@
      * */
     function toSvg(node, options) {
         options = options || {};
+        options.width = options.width || util.width(node);
+        options.height = options.height || util.height(node);
+
         return Promise.resolve({node: node})
             .then(function (ctx) {
                 return cloneNode(ctx, options.filter, true);
             })
             .then(embedFonts)
-            .then(inlineImages)
-            .then(applyOptions)
-            .then(function (ctx) {
-                return makeSvgDataUri(ctx,
-                    options.width || util.width(node),
-                    options.height || util.height(node)
-                );
+            .then(options.batch ? asyncPipeline : syncPipeline);
+
+        function asyncPipeline(ctx) {
+            if (!asyncState) {
+                asyncState = {
+                    pool: createPool(),
+                    promises: {},
+                    i: 0
+                };
+            }
+
+            return new Promise(function(resolve, reject) {
+                var id = asyncState.i++;
+                asyncState.promises[id] = { resolve: resolve, reject: reject };
+                asyncState.pool.postMessage({ id: id, ctx: ctx, options: options });
             });
 
-        function applyOptions(ctx) {
-            var str = [ctx.styleText || ''];
-            if (options.bgcolor) pushStyle(str, 'background-color', options.bgcolor);
+            function createPool() {
 
-            if (options.width) pushStyle(str, 'width', options.width + 'px');
-            if (options.height) pushStyle(str, 'height', options.height + 'px');
+                function Pool(url, onMessage) {
+                    var size = navigator.hardwareConcurrency - 1;
+                    this.workers = [];
+                    while (size--) {
+                        var worker = new Worker(url);
+                        this.workers.push(worker);
+                        worker.onmessage = onMessage;
+                    }
+                    this.i = 0;
+                }
 
-            if (options.style)
-                Object.keys(options.style).forEach(function (property) {
-                    pushStyle(str, kebabCase(property), options.style[property]);
+                Pool.prototype.postMessage = function(data) {
+                    if (++this.i == this.workers.length) this.i = 0;
+                    this.workers[this.i].postMessage(data);
+                };
+
+                /* http://stackoverflow.com/a/19201292/7942634 */
+                var workerFnString = workerFn.toString().replace(/'@inject:(.*?)'/g, function(s, m) {
+                    return eval(m).toString();
                 });
-
-            ctx.styleText = str.join('');
-            return ctx;
-
-            function pushStyle(str, k, v) {
-                str.push(' ', k, ': ', v, ';');
+                var blobURL = URL.createObjectURL(new Blob(['(', workerFnString, ')()'], { type: 'application/javascript' }));
+                var pool = new Pool(blobURL, onMessage);
+                URL.revokeObjectURL(blobURL);
+                return pool;
             }
 
-            function kebabCase(s) {
-                return s.replace(/[A-Z]/g, function(m) {
-                    return '-' + m.toLowerCase();
-                });
+            function workerFn() {
+                onmessage = function(e) {
+                    syncPipeline(e.data.ctx, e.data.options)
+                        .then(function(uri) {
+                            postMessage({ id: e.data.id, uri: uri });
+                        })
+                        .catch(function(error) {
+                            postMessage({ id: e.data.id, error: error.toString() });
+                        });
+                };
+
+                '@inject:syncPipeline';
+                '@inject:inlineImages';
+                '@inject:applyOptions';
+                '@inject:makeSvgDataUri';
+
+                var images = newImages();
+                '@inject:newImages';
+
+                var inliner = newInliner();
+                '@inject:newInliner';
+
+                var util = newUtil();
+                '@inject:newUtil';
+            };
+
+            function onMessage(e) {
+                var promises = asyncState.promises[e.data.id];
+                if (e.data.uri) promises.resolve(e.data.uri);
+                else promises.reject(e.data.error);
+                delete asyncState.promises[e.data.id];
             }
+        }
+
+        function syncPipeline(ctx, opts) {
+            opts = opts || options;
+            return Promise.resolve(ctx)
+                .then(inlineImages)
+                .then(applyOptions(opts))
+                .then(function(ctx) {
+                    return makeSvgDataUri(ctx, opts.width, opts.height);
+                })
+        }
+
+
+        function inlineImages(ctx) {
+            return images.inlineAll(ctx)
+                .then(function () {
+                    return ctx;
+                });
+        }
+
+        function applyOptions(options) {
+            return function(ctx) {
+                var str = [ctx.styleText || ''];
+                if (options.bgcolor) pushStyle(str, 'background-color', options.bgcolor);
+
+                if (options.width) pushStyle(str, 'width', options.width + 'px');
+                if (options.height) pushStyle(str, 'height', options.height + 'px');
+
+                if (options.style)
+                    Object.keys(options.style).forEach(function (property) {
+                        pushStyle(str, kebabCase(property), options.style[property]);
+                    });
+
+                ctx.styleText = str.join('');
+                return ctx;
+
+                function pushStyle(str, k, v) {
+                    str.push(' ', k, ': ', v, ';');
+                }
+
+                function kebabCase(s) {
+                    return s.replace(/[A-Z]/g, function(m) {
+                        return '-' + m.toLowerCase();
+                    });
+                }
+            };
         }
     }
 
@@ -334,17 +428,6 @@
                         content: cssText
                     }]
                 });
-                return ctx;
-                // var styleNode = document.createElement('style');
-                // node.appendChild(styleNode);
-                // styleNode.appendChild(document.createTextNode(cssText));
-                // return node;
-            });
-    }
-
-    function inlineImages(ctx) {
-        return images.inlineAll(ctx)
-            .then(function () {
                 return ctx;
             });
     }
