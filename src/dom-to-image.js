@@ -263,7 +263,8 @@
             })
             .then(function (ctx) {
                 return processClone(node, ctx);
-            });
+            })
+            .then(removeElementsFromContext);
 
         function makeNodeCopy(ctx) {
             ctx.attr = {};
@@ -410,6 +411,12 @@
                     ctx.cssOverrides.push(attribute, ':', value, '; ');
                 });
             }
+        }
+
+        function removeElementsFromContext(ctx) {
+            delete ctx.node;
+            if (ctx.children) ctx.children.forEach(removeElementsFromContext);
+            return ctx;
         }
     }
 
