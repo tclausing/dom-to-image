@@ -149,22 +149,19 @@
 
         function applyOptions(options) {
             return function(ctx) {
-                var str = [ctx.styleText || ''];
-                if (options.bgcolor) pushStyle(str, 'background-color', options.bgcolor);
+                if (options.bgcolor) pushStyle(ctx.cssOverrides, 'background-color', options.bgcolor);
 
-                if (options.width) pushStyle(str, 'width', options.width + 'px');
-                if (options.height) pushStyle(str, 'height', options.height + 'px');
+                if (options.width) pushStyle(ctx.cssOverrides, 'width', options.width + 'px');
+                if (options.height) pushStyle(ctx.cssOverrides, 'height', options.height + 'px');
 
                 if (options.style)
                     Object.keys(options.style).forEach(function (property) {
-                        pushStyle(str, kebabCase(property), options.style[property]);
+                        pushStyle(ctx.cssOverrides, kebabCase(property), options.style[property]);
                     });
-
-                ctx.styleText = str.join('');
                 return ctx;
 
-                function pushStyle(str, k, v) {
-                    str.push(' ', k, ': ', v, ';');
+                function pushStyle(buffer, k, v) {
+                    buffer.push(k, ': ', v, '; ');
                 }
 
                 function kebabCase(s) {
@@ -327,15 +324,20 @@
                 });
 
             function cloneStyle() {
-                copyStyle(window.getComputedStyle(original), ctx);
+                var style = window.getComputedStyle(original);
+                ctx.cssText = style.cssText || '';
+                ctx.cssOverrides = [];
+                if (!ctx.cssText) pushStyles(ctx.cssOverrides, style);
+                ctx.backgroundImage = {
+                    value: style.getPropertyValue('background-image'),
+                    priority: style.getPropertyPriority('background-image')
+                };
 
-                function copyStyle(source, ctx) {
-                    ctx.style = {};
-                    util.asArray(source).forEach(function (name) {
-                        ctx.style[name] = {
-                            value: source.getPropertyValue(name),
-                            priority: source.getPropertyPriority(name)
-                        };
+                function pushStyles(buffer, style) {
+                    util.asArray(style).forEach(function (name) {
+                        buffer.push(name, ': ', style.getPropertyValue(name));
+                        if (style.getPropertyPriority(name)) buffer.push(' !important');
+                        buffer.push('; ');
                     });
                 }
             }
@@ -406,7 +408,7 @@
                     var value = original.getAttribute(attribute);
                     if (!value) return;
 
-                    ctx.styleText = [ctx.styleText || '', attribute, ':', value, ';'].join('');
+                    ctx.cssOverrides.push(attribute, ':', value, '; ');
                 });
             }
         }
@@ -478,19 +480,10 @@
                     }
 
                     function createStyleAttr(ctx) {
-                        if (ctx.style || ctx.styleText) {
-                            var styles = [];
-                            if (ctx.style) serializeCssObj(ctx.style, styles);
-                            if (ctx.styleText) styles.push(ctx.styleText);
-                            ctx.attr.style = styles.join('');
-                        }
-
-                        function serializeCssObj(o, styles) {
-                            for (var i in o) {
-                                styles.push(i, ': ', o[i].value);
-                                if (o[i].priority) styles.push(' !important');
-                                styles.push('; ');
-                            }
+                        if (ctx.cssText || (ctx.cssOverrides && ctx.cssOverrides.length)) {
+                            var buffer = ctx.cssOverrides || [];
+                            buffer.unshift(ctx.cssText || '');
+                            ctx.attr.style = buffer.join('');
                         }
                     }
                 }
@@ -896,9 +889,7 @@
                 });
 
             function inlineBackground(ctx) {
-                if (!ctx.style) return Promise.resolve(ctx);
-
-                var backgroundObj = ctx.style['background-image'];
+                var backgroundObj = ctx.backgroundImage;
                 var background = backgroundObj && backgroundObj.value;
 
                 if (!background || background === 'none') return Promise.resolve(ctx);
@@ -906,7 +897,7 @@
                 return inliner.inlineAll(background)
                     .then(function (inlined) {
                         var priority = (backgroundObj && backgroundObj.priority) ? ' !important' : '';
-                        ctx.styleText = [ctx.styleText || '', ' background-image: ', inlined, priority, ';'].join('');
+                        ctx.cssOverrides.push('background-image: ', inlined, priority, '; ');
                     })
                     .then(function () {
                         return ctx;
